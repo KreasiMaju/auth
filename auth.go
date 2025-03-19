@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -158,21 +160,48 @@ func RegisterRoutes(e *echo.Echo) {
 
 // ===== Autentikasi Lokal dan OTP =====
 
-// RegisterLocal mendaftarkan pengguna baru dengan email dan password
+// RegisterLocal mendaftarkan pengguna dengan email dan password
 func RegisterLocal(email, password, firstName, lastName, phone, defaultRegion string) (*models.User, error) {
-	// Hash password
-	hashedPassword, err := utils.HashPassword(password)
-	if err != nil {
+	// Validasi email
+	if email == "" {
+		return nil, fmt.Errorf("email wajib diisi")
+	}
+
+	// Validasi password
+	if password == "" {
+		return nil, fmt.Errorf("password wajib diisi")
+	}
+
+	// Cek apakah email sudah terdaftar
+	var existingUser models.User
+	err := utils.DB.Where("email = ?", email).First(&existingUser).Error
+	if err == nil {
+		return nil, fmt.Errorf("email sudah terdaftar")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
 
-	// Format nomor telepon ke format internasional jika ada
-	formattedPhone := phone
+	// Format dan validasi nomor telepon jika ada
+	var formattedPhone string
 	if phone != "" {
 		formattedPhone, err = utils.FormatPhoneNumber(phone, defaultRegion)
 		if err != nil {
 			return nil, fmt.Errorf("format nomor telepon tidak valid: %v", err)
 		}
+
+		// Cek apakah nomor telepon sudah terdaftar
+		err = utils.DB.Where("phone = ?", formattedPhone).First(&existingUser).Error
+		if err == nil {
+			return nil, fmt.Errorf("nomor telepon sudah terdaftar")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+
+	// Hash password
+	hashedPassword, err := utils.HashPassword(password)
+	if err != nil {
+		return nil, err
 	}
 
 	// Buat pengguna baru
@@ -182,38 +211,42 @@ func RegisterLocal(email, password, firstName, lastName, phone, defaultRegion st
 		Phone:     formattedPhone,
 		FirstName: firstName,
 		LastName:  lastName,
-		Role:      "user", // Default role
+		Role:      "user",
 	}
 
 	// Simpan ke database
-	err = utils.DB.Create(&user).Error
-	if err != nil {
+	if err := utils.DB.Create(&user).Error; err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			if strings.Contains(err.Error(), "users.email") {
+				return nil, fmt.Errorf("email sudah terdaftar")
+			}
+			if strings.Contains(err.Error(), "users.phone") {
+				return nil, fmt.Errorf("nomor telepon sudah terdaftar")
+			}
+		}
 		return nil, err
 	}
 
 	return &user, nil
 }
 
-// LoginLocal melakukan autentikasi pengguna dengan email atau nomor telepon dan password
+// LoginLocal melakukan autentikasi pengguna dengan email/phone dan password
 func LoginLocal(identifier, password string) (*models.User, error) {
-	// Cari pengguna berdasarkan email atau telepon
 	var user models.User
 
 	// Coba cari dengan email
 	err := utils.DB.Where("email = ?", identifier).First(&user).Error
-
-	// Jika tidak ditemukan dengan email, coba cari dengan nomor telepon
-	if err != nil && err == gorm.ErrRecordNotFound {
-		err = utils.DB.Where("phone = ?", identifier).First(&user).Error
-	}
-
 	if err != nil {
-		return nil, err
+		// Jika tidak ditemukan, coba cari dengan nomor telepon
+		err = utils.DB.Where("phone = ?", identifier).First(&user).Error
+		if err != nil {
+			return nil, fmt.Errorf("email atau password tidak valid")
+		}
 	}
 
-	// Periksa password
-	if !utils.CheckPassword(user.Password, password) {
-		return nil, fmt.Errorf("password tidak valid")
+	// Verifikasi password
+	if !utils.CheckPasswordHash(password, user.Password) {
+		return nil, fmt.Errorf("email atau password tidak valid")
 	}
 
 	// Update last login time
@@ -242,16 +275,20 @@ func GenerateOTP(userID uint, otpType, target, purpose string) (*models.OTPCode,
 	}
 
 	// Tentukan panjang kode OTP
-	codeLength := configuration.OTP.Length
-	if codeLength <= 0 {
-		codeLength = 6 // default 6 digit
+	codeLength := 6
+	if configuration.OTP.Length > 0 {
+		codeLength = configuration.OTP.Length
 	}
 
 	// Generate kode OTP acak
 	code := utils.GenerateOTP(codeLength)
 
-	// Hitung waktu kedaluwarsa
-	expiresAt := time.Now().Add(time.Duration(configuration.OTP.ExpiresIn) * time.Second)
+	// Hitung waktu kedaluwarsa (default 5 menit jika tidak ada konfigurasi)
+	expirySeconds := int64(300)
+	if configuration.OTP.ExpiresIn > 0 {
+		expirySeconds = configuration.OTP.ExpiresIn
+	}
+	expiresAt := time.Now().Add(time.Duration(expirySeconds) * time.Second)
 
 	// Buat OTP baru
 	otpCode := models.OTPCode{
@@ -304,9 +341,15 @@ func SendOTP(otpCode *models.OTPCode) error {
 		return fmt.Errorf("OTP code is nil")
 	}
 
+	// Hitung waktu kedaluwarsa dalam detik
+	expirySeconds := int64(300) // default 5 menit
+	if configuration.OTP.ExpiresIn > 0 {
+		expirySeconds = configuration.OTP.ExpiresIn
+	}
+
 	// Siapkan pesan OTP
 	message := fmt.Sprintf("Kode OTP Anda adalah: %s. Kode berlaku selama %d detik.",
-		otpCode.Code, configuration.OTP.ExpiresIn)
+		otpCode.Code, expirySeconds)
 
 	// Implementasi pengiriman OTP
 	switch otpCode.Type {
@@ -420,6 +463,29 @@ func VerifyOTPLogin(contact, otpType, code, defaultRegion string) (*models.User,
 
 	if !valid {
 		return nil, fmt.Errorf("kode OTP tidak valid")
+	}
+
+	// Update last login time
+	now := time.Now()
+	user.LastLogin = &now
+	utils.DB.Save(&user)
+
+	return &user, nil
+}
+
+// Login melakukan autentikasi pengguna dengan email dan password
+func Login(email, password string) (*models.User, error) {
+	var user models.User
+
+	// Cari pengguna berdasarkan email
+	err := utils.DB.Where("email = ?", email).First(&user).Error
+	if err != nil {
+		return nil, fmt.Errorf("email atau password tidak valid")
+	}
+
+	// Verifikasi password
+	if !utils.CheckPasswordHash(password, user.Password) {
+		return nil, fmt.Errorf("email atau password tidak valid")
 	}
 
 	// Update last login time

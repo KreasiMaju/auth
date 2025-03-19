@@ -1,16 +1,20 @@
-# KreasiMaju Auth
+# Kreasimaju Auth
 
-Package autentikasi yang dapat digunakan kembali untuk proyek-proyek berbasis Golang. Package ini menyediakan solusi otentikasi yang lengkap dengan dukungan berbagai provider dan migrasi database otomatis.
+[![Go](https://github.com/kreasimaju/auth/actions/workflows/go.yml/badge.svg)](https://github.com/kreasimaju/auth/actions/workflows/go.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kreasimaju/auth)](https://goreportcard.com/report/github.com/kreasimaju/auth)
+[![Version](https://img.shields.io/github/v/tag/kreasimaju/auth)](https://github.com/kreasimaju/auth/releases)
+
+Package autentikasi Go untuk aplikasi modern dengan dukungan lokal, OTP, dan OAuth.
 
 ## Fitur
 
-- 🔐 Autentikasi multi-provider (Google, Twitter, GitHub, dll)
-- 📊 Migrasi database otomatis
-- 🛡️ Middleware untuk perlindungan rute
-- 🔄 Manajemen sesi dan token
-- 📱 Dukungan untuk autentikasi berbasis JWT
-- 👤 Manajemen profil pengguna
-- 🔐 Reset password dan verifikasi email
+- 🔒 Autentikasi lokal (email/password)
+- 📱 Autentikasi dengan OTP (email, SMS, WhatsApp)
+- 🌐 Autentikasi OAuth (Google, GitHub, dll.)
+- 🔑 Manajemen token JWT
+- 📞 Dukungan nomor telepon internasional
+- 🔄 Manajemen reset password
+- 🛡️ Validasi data robust
 
 ## Instalasi
 
@@ -18,106 +22,194 @@ Package autentikasi yang dapat digunakan kembali untuk proyek-proyek berbasis Go
 go get github.com/kreasimaju/auth
 ```
 
-## Penggunaan Cepat
+## Konfigurasi
+
+Buat file konfigurasi (JSON, YAML, atau ENV) dan muat saat inisialisasi:
 
 ```go
-package main
+import "github.com/kreasimaju/auth"
 
+func main() {
+	// Muat konfigurasi dari file
+	config, err := auth.LoadConfig("config.json")
+	if err != nil {
+		panic(err)
+	}
+
+	// Inisialisasi autentikasi
+	err = auth.Init(config)
+	if err != nil {
+		panic(err)
+	}
+
+	// Siap digunakan!
+}
+```
+
+Contoh konfigurasi JSON:
+
+```json
+{
+  "database": {
+    "type": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "username": "root",
+    "password": "password",
+    "database": "auth_db",
+    "auto_migrate": true
+  },
+  "providers": {
+    "google": {
+      "enabled": true,
+      "client_id": "your-client-id",
+      "client_secret": "your-client-secret",
+      "callback_url": "http://localhost:8080/auth/google/callback",
+      "scopes": ["email", "profile"]
+    },
+    "local": true,
+    "otp_auth": true
+  },
+  "jwt": {
+    "secret": "your-jwt-secret",
+    "expires_in": 86400
+  },
+  "otp": {
+    "enabled": true,
+    "default_type": "email",
+    "length": 6,
+    "expires_in": 300
+  }
+}
+```
+
+## Penggunaan Dasar
+
+### Autentikasi Lokal
+
+```go
+// Registrasi pengguna baru
+user, err := auth.RegisterLocal("user@example.com", "password123", "John", "Doe", "081234567890", "ID")
+
+// Login
+user, err := auth.Login("user@example.com", "password123")
+
+// Generate JWT token
+token, err := auth.GenerateToken(user)
+```
+
+### Autentikasi OTP
+
+```go
+// Meminta OTP untuk login
+otpCode, err := auth.RequestOTPLogin("user@example.com", "email", "ID")
+
+// Memverifikasi OTP
+user, err := auth.VerifyOTPLogin("user@example.com", "email", "123456", "ID")
+```
+
+### Autentikasi OAuth
+
+```go
+// Redirect URL untuk autentikasi Google
+url := auth.GetGoogleAuthURL("state")
+
+// Proses callback dari Google
+user, err := auth.HandleGoogleCallback(code)
+```
+
+## API Web
+
+Package ini menyediakan handler HTTP siap pakai untuk Echo framework:
+
+```go
 import (
 	"github.com/kreasimaju/auth"
-	"github.com/kreasimaju/auth/config"
+	"github.com/labstack/echo/v4"
 )
 
 func main() {
-	// Inisialisasi auth dengan konfigurasi
-	auth.Init(config.Config{
-		Database: config.Database{
-			Type:        "mysql", // atau "postgres", "sqlite", dll
-			Host:        "localhost",
-			Port:        3306,
-			Username:    "root",
-			Password:    "password",
-			Database:    "myapp",
-			AutoMigrate: true, // Jalankan migrasi otomatis
-		},
-		Providers: config.Providers{
-			Google: config.OAuth{
-				ClientID:     "your-client-id",
-				ClientSecret: "your-client-secret",
-				CallbackURL:  "http://localhost:8080/auth/google/callback",
-			},
-			Twitter: config.OAuth{
-				// konfigurasi twitter
-			},
-			// provider lainnya...
-		},
-		OTP: config.OTP{
-			Enabled:     true,
-			DefaultType: "sms", // atau "email", "whatsapp"
-			Length:      6,
-			ExpiresIn:   300, // 5 menit
-			SMS: config.OTPProvider{
-				Enabled: true,
-				APIKey:  "your-sms-api-key",
-			},
-			Email: config.OTPProvider{
-				Enabled: true,
-				APIKey:  "your-email-api-key",
-			},
-			WhatsApp: config.OTPProvider{
-				Enabled: true,
-				APIKey:  "your-whatsapp-api-key",
-			},
-		},
-	})
-
-	// Integrasi dengan framework Go web populer (contoh dengan Echo)
+	// Inisialisasi Echo
 	e := echo.New()
-	
-	// Daftarkan middleware auth
-	e.Use(auth.Middleware())
-	
-	// Tambahkan route autentikasi
-	auth.RegisterRoutes(e)
-	
+
+	// Daftarkan route autentikasi
+	auth.RegisterRoutes(e.Group("/auth"))
+
+	// Jalankan server
 	e.Start(":8080")
 }
 ```
 
-## Skema Database
+Ini akan menyediakan endpoint berikut:
+- `POST /auth/register` - Registrasi pengguna
+- `POST /auth/login` - Login pengguna
+- `POST /auth/otp/request` - Request OTP
+- `POST /auth/otp/verify` - Verifikasi OTP
+- `GET /auth/oauth/google` - Login dengan Google
+- Dan lainnya...
 
-Package ini akan membuat tabel-tabel berikut secara otomatis:
+Untuk dokumentasi API lengkap, lihat [API Documentation](docs/API.md).
 
-- `users` - Informasi dasar pengguna
-- `user_providers` - Informasi provider autentikasi
-- `sessions` - Sesi pengguna
-- `tokens` - Token reset password, verifikasi email, dll
+## Integrasi Provider SMS
 
-## Todo List
+Package ini mendukung integrasi dengan berbagai provider SMS, seperti:
+- Twilio
+- Vonage (Nexmo)
+- Zenziva (Indonesia)
+- Infobip
+- Dan lainnya
 
-- [x] Setup struktur project dasar
-- [x] Implementasi koneksi database dan migrasi otomatis menggunakan GORM
-- [x] Membuat model User dan tabel terkait
-- [x] Implementasi autentikasi lokal (email/password)
-- [x] Implementasi JWT dan manajemen token
-- [x] Integrasi provider OAuth (Google)
-- [ ] Integrasi provider OAuth (Twitter)
-- [ ] Integrasi provider OAuth (GitHub)
-- [x] Implementasi middleware untuk framework Go populer (Echo, Gin, Fiber)
-- [ ] Fitur reset password
-- [x] Fitur OTP (SMS, Email, WhatsApp)
-- [ ] Fitur verifikasi email
-- [ ] Pengujian dan dokumentasi
-- [ ] Publish ke GitHub
-- [x] Contoh penggunaan dengan Echo
-- [x] Contoh penggunaan dengan Gin
-- [x] Contoh penggunaan dengan Fiber
-- [ ] Implementasi hook dan event untuk kustomisasi
+Untuk panduan integrasi lebih lanjut, lihat [Panduan Integrasi SMS](docs/SMS_INTEGRATION.md).
 
-## Dokumentasi
+## Build dari Source
 
-Dokumentasi lengkap dapat ditemukan di [docs/README.md](docs/README.md)
+Anda dapat membangun package ini langsung dari source:
+
+```bash
+# Clone repository
+git clone https://github.com/kreasimaju/auth.git
+cd auth
+
+# Setup dependensi
+make setup
+
+# Jalankan pengujian
+make test
+
+# Build
+make build
+```
+
+## Pengembangan
+
+Kontribusi sangat dipersilakan! Untuk memulai pengembangan:
+
+```bash
+# Fork repository dan clone
+git clone https://github.com/YOUR-USERNAME/auth.git
+cd auth
+
+# Setup
+make setup
+
+# Lakukan perubahan yang diinginkan...
+
+# Format kode
+make fmt
+
+# Jalankan linter
+make lint
+
+# Jalankan pengujian
+make test
+
+# Buat pull request
+```
+
+## Versi
+
+Lihat riwayat [Rilis](https://github.com/kreasimaju/auth/releases) untuk daftar perubahan dan versi.
 
 ## Lisensi
 
-MIT 
+Package ini dilisensikan di bawah [MIT License](LICENSE). 
